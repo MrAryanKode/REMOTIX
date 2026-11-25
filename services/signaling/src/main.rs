@@ -1,25 +1,29 @@
-
-use axum::{routing::get, Router};
+use remotix_signaling::build_app;
 use tokio::net::TcpListener;
-
-async fn health() -> &'static str {
-    "REMOTIX signalling online"
-}
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let app = Router::new()
-        .route("/health", get(health));
+    let token = std::env::var("REMOTIX_DEV_TOKEN").expect("REMOTIX_DEV_TOKEN must be set");
 
-    let listener = TcpListener::bind("127.0.0.1:8787")
+    if token.len() < 32 {
+        panic!("REMOTIX_DEV_TOKEN must contain at least 32 characters");
+    }
+
+    let bind_address =
+        std::env::var("REMOTIX_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+
+    let app = build_app(token);
+
+    let listener = TcpListener::bind(&bind_address)
         .await
-        .expect("Could not bind server");
+        .expect("Failed to bind signalling server");
 
-    println!("REMOTIX signalling server starting...");
+    info!("REMOTIX signalling server listening on {}", bind_address);
 
     axum::serve(listener, app)
         .await
-        .expect("Server error");
+        .expect("Signalling server failed");
 }
