@@ -5,9 +5,11 @@
 
 <div align="center">
 
-# ⚡ REMOTIX
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:050816,45:0B3B66,100:5426A8&height=210&section=header&text=REMOTIX&fontSize=76&fontColor=FFFFFF&fontAlignY=38&desc=YOUR%20PC.%20ANYWHERE.%20ANYTIME.&descAlignY=60&descSize=18&animation=fadeIn" width="100%" alt="REMOTIX animated header" />
 
-### Your PC. Anywhere. Anytime.
+<a href="https://github.com/MrAryanKode/REMOTIX">
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=600&size=19&duration=2600&pause=850&color=38BDF8&center=true&vCenter=true&width=850&height=55&lines=Secure+remote+access%2C+without+borders.;One+phone.+Your+whole+workspace.;Built+for+speed.+Designed+for+trust.;Windows+%E2%80%A2+Linux+%E2%80%A2+Android+%E2%80%A2+iOS" alt="REMOTIX animated tagline" />
+</a>
 
 **A high-performance, cross-platform remote desktop platform — built for responsive control, secure connections, and freedom across devices.**
 
