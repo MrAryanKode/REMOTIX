@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-
 members = [
     "agents/host",
     "services/signaling",
     "packages/protocol",
+    "packages/device-identity",
 ]
 
 [workspace.package]
