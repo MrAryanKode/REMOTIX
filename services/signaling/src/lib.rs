@@ -42,6 +42,7 @@ struct Peer {
 }
 
 struct Session {
+    host_device_id: Uuid,
     host: Option<Peer>,
     controller: Option<Peer>,
 }
@@ -182,6 +183,7 @@ async fn route_message(
     connection_id: Uuid,
     role: &mut Option<DeviceRole>,
     device_id: &mut Option<Uuid>,
+    authenticated_host_id: &mut Option<Uuid>,
     outgoing: &mpsc::Sender<Message>,
     disconnect: &watch::Sender<bool>,
     sessions: &Arc<Mutex<HashMap<Uuid, Session>>>,
@@ -490,12 +492,143 @@ async fn route_message(
         }
 
         // ---------------------------------------------------------
+        // CONTROLLER BEGINS HOST-BOUND AUTHENTICATION
+        // ---------------------------------------------------------
+        SignalMessage::BeginAuthentication {
+            host_device_id,
+            controller_device_id,
+        } => {
+            if role.as_ref() == Some(&DeviceRole::Host) {
+                return Err(("forbidden", "Hosts cannot authenticate as controllers"));
+            }
+
+            if let Some(registered_device) = device_id {
+                if registered_device != controller_device_id {
+                    return Err((
+                        "device_mismatch",
+                        "Controller device ID does not match this connection",
+                    ));
+                }
+            }
+
+            if authenticated_host_id.is_some() {
+                return Err((
+                    "already_authenticated",
+                    "This connection has already authenticated for a host",
+                ));
+            }
+
+            let challenge = {
+                let mut manager = pairings.lock().await;
+                manager
+                    .begin_authentication(
+                        *host_device_id,
+                        *controller_device_id,
+                        connection_id,
+                        current_unix_time(),
+                    )
+                    .map_err(pairing_error_response)?
+            };
+
+            let nonce: [u8; 32] = challenge
+                .nonce
+                .as_slice()
+                .try_into()
+                .map_err(|_| ("invalid_challenge", "Server generated an invalid challenge"))?;
+
+            let response = SignalEnvelope::new(SignalMessage::AuthenticationChallenge {
+                host_device_id: challenge.host_device_id,
+                controller_device_id: challenge.controller_device_id,
+                challenge_id: challenge.challenge_id,
+                nonce,
+                expires_at_unix: challenge.expires_at_unix,
+            });
+
+            if !send_envelope(outgoing, &response) {
+                let _ = disconnect.send(true);
+            }
+        }
+
+        // ---------------------------------------------------------
+        // CONTROLLER PROVES HOST-BOUND DEVICE IDENTITY
+        // ---------------------------------------------------------
+        SignalMessage::Authenticate {
+            host_device_id,
+            controller_device_id,
+            challenge_id,
+            signature,
+        } => {
+            if role.as_ref() == Some(&DeviceRole::Host) {
+                return Err(("forbidden", "Hosts cannot authenticate as controllers"));
+            }
+
+            if let Some(registered_device) = device_id {
+                if registered_device != controller_device_id {
+                    return Err((
+                        "device_mismatch",
+                        "Controller device ID does not match this connection",
+                    ));
+                }
+            }
+
+            if authenticated_host_id.is_some() {
+                return Err((
+                    "already_authenticated",
+                    "This connection has already authenticated for a host",
+                ));
+            }
+
+            let trusted_device = {
+                let mut manager = pairings.lock().await;
+                manager
+                    .complete_authentication(
+                        *host_device_id,
+                        *controller_device_id,
+                        connection_id,
+                        *challenge_id,
+                        signature,
+                        current_unix_time(),
+                    )
+                    .map_err(pairing_error_response)?
+            };
+
+            if trusted_device.device_id != *controller_device_id {
+                return Err((
+                    "unauthorized_controller",
+                    "Authenticated device identity does not match the request",
+                ));
+            }
+
+            *role = Some(DeviceRole::Controller);
+            *device_id = Some(trusted_device.device_id);
+            *authenticated_host_id = Some(*host_device_id);
+
+            let response = SignalEnvelope::new(SignalMessage::Authenticated {
+                host_device_id: *host_device_id,
+                controller_device_id: trusted_device.device_id,
+                role: DeviceRole::Controller,
+            });
+
+            if !send_envelope(outgoing, &response) {
+                let _ = disconnect.send(true);
+            }
+
+            info!(
+                "Controller authenticated for host {}: {}",
+                host_device_id, trusted_device.device_id
+            );
+        }
+
+        // ---------------------------------------------------------
         // SESSION CREATION
         // ---------------------------------------------------------
         SignalMessage::CreateSession { session_id } => {
             if role.as_ref() != Some(&DeviceRole::Host) {
                 return Err(("forbidden", "Only registered hosts can create sessions"));
             }
+
+            let host_device_id =
+                (*device_id).ok_or(("not_registered", "Host device identity is missing"))?;
 
             let mut sessions = sessions.lock().await;
 
@@ -506,6 +639,7 @@ async fn route_message(
             sessions.insert(
                 *session_id,
                 Session {
+                    host_device_id,
                     host: Some(Peer {
                         connection_id,
                         outgoing: outgoing.clone(),
@@ -536,6 +670,17 @@ async fn route_message(
                 let session = sessions
                     .get_mut(session_id)
                     .ok_or(("session_not_found", "Requested session does not exist"))?;
+
+                if *authenticated_host_id != Some(session.host_device_id) {
+                    return Err((
+                        "host_authentication_required",
+                        "Authenticate for this session's host before joining",
+                    ));
+                }
+
+                if *device_id == None {
+                    return Err(("not_authenticated", "Controller device identity is missing"));
+                }
 
                 if session.controller.is_some() {
                     return Err(("session_full", "This session already has a controller"));
@@ -718,13 +863,6 @@ async fn route_message(
             ));
         }
 
-        SignalMessage::BeginAuthentication { .. } | SignalMessage::Authenticate { .. } => {
-            return Err((
-                "not_implemented",
-                "Reconnection authentication is not implemented yet",
-            ));
-        }
-
         SignalMessage::Error { .. } => {
             return Err((
                 "invalid_message",
@@ -809,6 +947,7 @@ async fn handle_socket(
 
     let mut role: Option<DeviceRole> = None;
     let mut device_id: Option<Uuid> = None;
+    let mut authenticated_host_id: Option<Uuid> = None;
 
     info!("WebSocket client connected: {connection_id}");
 
@@ -891,8 +1030,15 @@ async fn handle_socket(
                                 | SignalMessage::ProvePairing { .. }
                         );
 
+                        let authentication_message = matches!(
+                            &envelope.message,
+                            SignalMessage::BeginAuthentication { .. }
+                                | SignalMessage::Authenticate { .. }
+                        );
+
                         if role.is_none()
                             && !pairing_message
+                            && !authentication_message
                             && !matches!(
                                 &envelope.message,
                                 SignalMessage::Register { .. }
@@ -915,6 +1061,7 @@ async fn handle_socket(
                             connection_id,
                             &mut role,
                             &mut device_id,
+                            &mut authenticated_host_id,
                             &outgoing,
                             &disconnect,
                             &sessions,
