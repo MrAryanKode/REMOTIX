@@ -1,3 +1,4 @@
+pub mod host_registry;
 mod pairing;
 
 use axum::{
@@ -856,10 +857,21 @@ async fn route_message(
         | SignalMessage::PairingRequested { .. }
         | SignalMessage::PairingResult { .. }
         | SignalMessage::AuthenticationChallenge { .. }
-        | SignalMessage::Authenticated { .. } => {
+        | SignalMessage::Authenticated { .. }
+        | SignalMessage::HostAuthenticationChallenge { .. }
+        | SignalMessage::HostAuthenticated { .. } => {
             return Err((
                 "invalid_message",
                 "Clients cannot send server-generated messages",
+            ));
+        }
+
+        // Host authentication is deliberately fail-closed until the
+        // enrollment registry and host verification flow are wired in.
+        SignalMessage::AuthenticateHost { .. } => {
+            return Err((
+                "host_auth_not_ready",
+                "Host authentication is not enabled on this server yet",
             ));
         }
 

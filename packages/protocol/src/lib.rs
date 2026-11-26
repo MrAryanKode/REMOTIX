@@ -148,6 +148,26 @@ pub enum SignalMessage {
         role: DeviceRole,
     },
 
+    // Server-issued challenge proving the host owns its enrolled key.
+    HostAuthenticationChallenge {
+        host_device_id: Uuid,
+        challenge_id: Uuid,
+        nonce: [u8; CHALLENGE_SIZE],
+        expires_at_unix: u64,
+    },
+
+    // Host signs the server-issued challenge.
+    AuthenticateHost {
+        host_device_id: Uuid,
+        challenge_id: Uuid,
+        signature: Vec<u8>,
+    },
+
+    // Server confirms that the host identity was verified.
+    HostAuthenticated {
+        host_device_id: Uuid,
+    },
+
     // Server errors.
     Error {
         code: String,
@@ -202,7 +222,8 @@ impl SignalEnvelope {
             }
 
             SignalMessage::ProvePairing { signature, .. }
-            | SignalMessage::Authenticate { signature, .. } => {
+            | SignalMessage::Authenticate { signature, .. }
+            | SignalMessage::AuthenticateHost { signature, .. } => {
                 if signature.len() != SIGNATURE_SIZE {
                     return Err(ProtocolError::InvalidLength("signature"));
                 }
@@ -444,5 +465,47 @@ mod tests {
         );
 
         assert!(serde_json::from_str::<SignalEnvelope>(&json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod server_host_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn validates_host_authentication_challenge() {
+        let envelope = SignalEnvelope::new(SignalMessage::HostAuthenticationChallenge {
+            host_device_id: Uuid::new_v4(),
+            challenge_id: Uuid::new_v4(),
+            nonce: [7u8; CHALLENGE_SIZE],
+            expires_at_unix: 12345,
+        });
+
+        assert!(envelope.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_host_authentication_signature_length() {
+        let envelope = SignalEnvelope::new(SignalMessage::AuthenticateHost {
+            host_device_id: Uuid::new_v4(),
+            challenge_id: Uuid::new_v4(),
+            signature: vec![1u8; SIGNATURE_SIZE],
+        });
+
+        assert!(envelope.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_host_authentication_signature_length() {
+        let envelope = SignalEnvelope::new(SignalMessage::AuthenticateHost {
+            host_device_id: Uuid::new_v4(),
+            challenge_id: Uuid::new_v4(),
+            signature: vec![1u8; 12],
+        });
+
+        assert_eq!(
+            envelope.validate(),
+            Err(ProtocolError::InvalidLength("signature")),
+        );
     }
 }

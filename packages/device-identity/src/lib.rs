@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 
 const CHALLENGE_DOMAIN: &[u8] = b"REMOTIX_AUTH_V2";
 const HOST_AUTH_DOMAIN: &[u8] = b"REMOTIX_HOST_AUTH_V1";
+const SERVER_HOST_AUTH_DOMAIN: &[u8] = b"REMOTIX_SERVER_HOST_AUTH_V1";
 const PROTOCOL_VERSION: u16 = 1;
 
 pub const CHALLENGE_SIZE: usize = 32;
@@ -37,6 +38,13 @@ impl DeviceIdentity {
 
     pub fn public_key(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Exports the secret key bytes for protected local persistence.
+    ///
+    /// Callers must protect the returned copy and clear it after use.
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
     }
 
     pub fn fingerprint(&self) -> String {
@@ -75,6 +83,22 @@ impl DeviceIdentity {
             challenge_id,
             nonce,
         )?;
+
+        Ok(self.signing_key.sign(&transcript).to_bytes())
+    }
+
+    /// Signs a server-issued challenge proving this host's identity.
+    ///
+    /// The signature is bound to the host ID, challenge ID, nonce,
+    /// protocol version, and a dedicated domain separator.
+    pub fn sign_server_host_challenge(
+        &self,
+        host_device_id: &[u8; DEVICE_ID_SIZE],
+        challenge_id: &[u8; CHALLENGE_ID_SIZE],
+        nonce: &[u8],
+    ) -> Result<[u8; SIGNATURE_SIZE], IdentityError> {
+        let transcript =
+            build_server_host_authentication_transcript(host_device_id, challenge_id, nonce)?;
 
         Ok(self.signing_key.sign(&transcript).to_bytes())
     }
@@ -138,6 +162,49 @@ fn build_host_authentication_transcript(
     transcript.extend_from_slice(nonce);
 
     Ok(transcript)
+}
+
+fn build_server_host_authentication_transcript(
+    host_device_id: &[u8; DEVICE_ID_SIZE],
+    challenge_id: &[u8; CHALLENGE_ID_SIZE],
+    nonce: &[u8],
+) -> Result<Vec<u8>, IdentityError> {
+    if nonce.len() != CHALLENGE_SIZE {
+        return Err(IdentityError::InvalidChallenge);
+    }
+
+    let mut transcript = Vec::with_capacity(
+        SERVER_HOST_AUTH_DOMAIN.len() + 2 + DEVICE_ID_SIZE + CHALLENGE_ID_SIZE + CHALLENGE_SIZE,
+    );
+
+    transcript.extend_from_slice(SERVER_HOST_AUTH_DOMAIN);
+    transcript.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    transcript.extend_from_slice(host_device_id);
+    transcript.extend_from_slice(challenge_id);
+    transcript.extend_from_slice(nonce);
+
+    Ok(transcript)
+}
+
+/// Verifies a host's proof of possession of its enrolled private key.
+pub fn verify_server_host_challenge(
+    public_key: &[u8; 32],
+    host_device_id: &[u8; DEVICE_ID_SIZE],
+    challenge_id: &[u8; CHALLENGE_ID_SIZE],
+    nonce: &[u8],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), IdentityError> {
+    let transcript =
+        build_server_host_authentication_transcript(host_device_id, challenge_id, nonce)?;
+
+    let verifying_key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| IdentityError::InvalidPublicKey)?;
+
+    let signature = Signature::from_bytes(signature);
+
+    verifying_key
+        .verify_strict(&transcript, &signature)
+        .map_err(|_| IdentityError::InvalidSignature)
 }
 
 pub fn verify_authentication(
@@ -524,6 +591,141 @@ mod tests {
                 b"short",
             ),
             Err(IdentityError::InvalidChallenge)
+        );
+    }
+}
+
+#[cfg(test)]
+mod server_host_auth_tests {
+    use super::*;
+
+    #[test]
+    fn verifies_valid_server_host_challenge() {
+        let identity = DeviceIdentity::generate();
+        let host_id = [1u8; DEVICE_ID_SIZE];
+        let challenge_id = [2u8; CHALLENGE_ID_SIZE];
+        let nonce = [3u8; CHALLENGE_SIZE];
+
+        let signature = identity
+            .sign_server_host_challenge(&host_id, &challenge_id, &nonce)
+            .unwrap();
+
+        assert!(
+            verify_server_host_challenge(
+                &identity.public_key(),
+                &host_id,
+                &challenge_id,
+                &nonce,
+                &signature,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_host_id() {
+        let identity = DeviceIdentity::generate();
+        let host_id = [1u8; DEVICE_ID_SIZE];
+        let challenge_id = [2u8; CHALLENGE_ID_SIZE];
+        let nonce = [3u8; CHALLENGE_SIZE];
+
+        let signature = identity
+            .sign_server_host_challenge(&host_id, &challenge_id, &nonce)
+            .unwrap();
+
+        assert_eq!(
+            verify_server_host_challenge(
+                &identity.public_key(),
+                &[9u8; DEVICE_ID_SIZE],
+                &challenge_id,
+                &nonce,
+                &signature,
+            ),
+            Err(IdentityError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_challenge_id() {
+        let identity = DeviceIdentity::generate();
+        let host_id = [1u8; DEVICE_ID_SIZE];
+        let challenge_id = [2u8; CHALLENGE_ID_SIZE];
+        let nonce = [3u8; CHALLENGE_SIZE];
+
+        let signature = identity
+            .sign_server_host_challenge(&host_id, &challenge_id, &nonce)
+            .unwrap();
+
+        assert_eq!(
+            verify_server_host_challenge(
+                &identity.public_key(),
+                &host_id,
+                &[8u8; CHALLENGE_ID_SIZE],
+                &nonce,
+                &signature,
+            ),
+            Err(IdentityError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn rejects_modified_nonce() {
+        let identity = DeviceIdentity::generate();
+        let host_id = [1u8; DEVICE_ID_SIZE];
+        let challenge_id = [2u8; CHALLENGE_ID_SIZE];
+        let nonce = [3u8; CHALLENGE_SIZE];
+
+        let signature = identity
+            .sign_server_host_challenge(&host_id, &challenge_id, &nonce)
+            .unwrap();
+
+        assert_eq!(
+            verify_server_host_challenge(
+                &identity.public_key(),
+                &host_id,
+                &challenge_id,
+                &[4u8; CHALLENGE_SIZE],
+                &signature,
+            ),
+            Err(IdentityError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn rejects_another_identity_key() {
+        let identity = DeviceIdentity::generate();
+        let other_identity = DeviceIdentity::generate();
+        let host_id = [1u8; DEVICE_ID_SIZE];
+        let challenge_id = [2u8; CHALLENGE_ID_SIZE];
+        let nonce = [3u8; CHALLENGE_SIZE];
+
+        let signature = identity
+            .sign_server_host_challenge(&host_id, &challenge_id, &nonce)
+            .unwrap();
+
+        assert_eq!(
+            verify_server_host_challenge(
+                &other_identity.public_key(),
+                &host_id,
+                &challenge_id,
+                &nonce,
+                &signature,
+            ),
+            Err(IdentityError::InvalidSignature),
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_nonce_length() {
+        let identity = DeviceIdentity::generate();
+
+        assert_eq!(
+            identity.sign_server_host_challenge(
+                &[1u8; DEVICE_ID_SIZE],
+                &[2u8; CHALLENGE_ID_SIZE],
+                &[3u8; 12],
+            ),
+            Err(IdentityError::InvalidChallenge),
         );
     }
 }

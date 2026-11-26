@@ -17,6 +17,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"
+tempfile = "3"

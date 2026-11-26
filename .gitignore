@@ -36,3 +36,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+remotix-host-registry.db
+remotix-host-registry.db-shm
+remotix-host-registry.db-wal
